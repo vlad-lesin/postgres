@@ -12,16 +12,27 @@ RETURNS void
 AS 'MODULE_PATHNAME', 'prockill_become_lock_group_member'
 LANGUAGE C STRICT PARALLEL UNSAFE;
 
+-- Register (point_name, target_pid) in module shared memory and attach the
+-- prockill_test_wait callback to the INJECTION_POINT.  The wait is
+-- deliberately independent of procLatch / MyLatch / wait_event_info because
+-- ProcKill tears those down before the injection point fires.
 CREATE FUNCTION prockill_attach_injection_wait(point_name text, target_pid integer)
 RETURNS void
 AS 'MODULE_PATHNAME', 'prockill_attach_injection_wait'
 LANGUAGE C STRICT PARALLEL UNSAFE;
 
--- Test-only probe: is the backend with the given PID currently waiting on the
--- named injection point?  Looks directly at ProcGlobal->allProcs so it keeps
--- working while the target is blocked inside ProcKill() (after pgstat and
--- ProcArray teardown have already run).
-CREATE FUNCTION prockill_backend_in_injection(target_pid integer, point_name text)
+-- Test-only probe: is some backend currently sleeping inside
+-- prockill_test_wait for the named injection point?  Attachment is
+-- PID-scoped, so in practice this is true iff the target victim reached the
+-- point and entered the polling loop.
+CREATE FUNCTION prockill_injection_present(point_name text)
 RETURNS boolean
-AS 'MODULE_PATHNAME', 'prockill_backend_in_injection'
+AS 'MODULE_PATHNAME', 'prockill_injection_present'
+LANGUAGE C STRICT PARALLEL UNSAFE;
+
+-- Release the waiter (if any) sleeping inside prockill_test_wait for the
+-- named injection point.  Flips a shared-memory flag that the waiter polls.
+CREATE FUNCTION prockill_injection_wakeup(point_name text)
+RETURNS void
+AS 'MODULE_PATHNAME', 'prockill_injection_wakeup'
 LANGUAGE C STRICT PARALLEL UNSAFE;

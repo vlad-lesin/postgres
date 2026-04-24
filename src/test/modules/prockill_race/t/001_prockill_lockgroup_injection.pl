@@ -11,6 +11,13 @@
 # controller's final SELECT 1 succeeds.  Any of those failing indicates a
 # regression of the lock-group teardown fix.
 #
+# The wait/wakeup primitives are NOT injection_points's injection_wait: in the
+# fixed ProcKill, SwitchBackToLocalLatch / pgstat_reset_wait_event_storage /
+# DisownLatch all run above the INJECTION_POINT, which breaks every
+# procLatch-based wait.  Instead the prockill_race module provides a
+# shared-memory poll loop via prockill_injection_present() /
+# prockill_injection_wakeup().
+#
 # Why eval around some calls: safe_psql dies on connection errors.  If the
 # lock-group fix regresses, the postmaster may PANIC mid-scenario and later
 # psql invocations will fail to connect; we catch those failures so we can
@@ -37,7 +44,7 @@ if ($ENV{enable_injection_points} ne 'yes')
 my $node = PostgreSQL::Test::Cluster->new('prockill_race');
 $node->init;
 $node->append_conf('postgresql.conf',
-	q{shared_preload_libraries = 'injection_points'});
+	q{shared_preload_libraries = 'injection_points,prockill_race'});
 $node->start;
 
 plan skip_all => 'Extension injection_points not installed'
@@ -112,20 +119,28 @@ $node->safe_psql(
 $node->safe_psql('postgres',
 	"SELECT pg_terminate_backend($leader_pid)");
 
-my $leader_wait_ok = wait_for_injection_event(
-	$node, $leader_pid, 'prockill-after-lockgroup-leader');
+my $leader_wait_ok =
+  wait_for_injection_present($node, 'prockill-after-lockgroup-leader');
 
 eval {
 	$node->safe_psql('postgres',
 		"SELECT pg_terminate_backend($follower_pid)");
 };
 
-my $follower_wait_ok = wait_for_injection_event(
-	$node, $follower_pid, 'prockill-after-lockgroup-follower');
+my $follower_wait_ok =
+  wait_for_injection_present($node, 'prockill-after-lockgroup-follower');
+
+# Release the follower first.  Order matters: waking the leader first would
+# risk it completing ProcKill's freelist push before the follower reaches the
+# second INJECTION_POINT, hiding the bug under the fix.
+eval {
+	$node->safe_psql('postgres',
+		q{SELECT prockill_injection_wakeup('prockill-after-lockgroup-follower');});
+};
 
 eval {
 	$node->safe_psql('postgres',
-		q{SELECT injection_points_wakeup('prockill-after-lockgroup-follower');});
+		q{SELECT prockill_injection_wakeup('prockill-after-lockgroup-leader');});
 };
 
 ##########################################################
@@ -168,14 +183,8 @@ ok($outcome_ok, $outcome_desc);
 
 ok(
 	!$panic && ($leader_wait_ok && $follower_wait_ok),
-	'leader and follower reached ProcKill injection waits without latch PANIC (via PGPROC scan)'
+	'leader and follower reached ProcKill injection waits without latch PANIC'
 );
-
-eval {
-	$node->safe_psql('postgres',
-		q{SELECT injection_points_wakeup('prockill-after-lockgroup-leader');}
-	);
-};
 
 eval {
 	$node->safe_psql('postgres',
@@ -205,12 +214,10 @@ else
 done_testing();
 
 
-# Wait until the given backend (pid) reports the expected injection-point
-# wait event.  Uses prockill_backend_in_injection() from the prockill_race
-# extension, which reads PGPROC->wait_event_info directly via
-# ProcGlobal->allProcs and therefore keeps working while the target backend
-# is blocked inside ProcKill() -- after pgstat_beshutdown_hook and
-# RemoveProcFromArray have already torn down pg_stat_activity / BackendPidGetProc.
+# Wait until some backend has reported presence at the named injection point,
+# i.e. until prockill_injection_present() starts returning true.  The
+# attachment is PID-scoped by prockill_attach_injection_wait(), so in practice
+# the reporter is always the specific victim backend that entered ProcKill.
 #
 # Bounded loop.  We stop polling early if safe_psql dies with a signature of
 # "server is gone" (connection refused, closed mid-query, or the latch-recycle
@@ -218,18 +225,17 @@ done_testing();
 # shut down before we get here, in which case every subsequent poll would
 # just be a wasted psql fork/exec.  Classification of that outcome is left to
 # the caller (via the postmaster log / $@ on later statements).
-sub wait_for_injection_event
+sub wait_for_injection_present
 {
-	my ($node, $pid, $injection_name) = @_;
+	my ($node, $injection_name) = @_;
 	my $n = $injection_name;
 	$n =~ s/'/''/g;
 	# 200 * 50ms ~= 10s per phase.
 	for my $i (1 .. 200)
 	{
-		my $saw = eval
-		{
+		my $saw = eval {
 			$node->safe_psql('postgres',
-							 "SELECT prockill_backend_in_injection($pid, '$n')")
+				"SELECT prockill_injection_present('$n')")
 		};
 		my $err = $@;
 		return 1 if defined $saw && $saw eq 't';
