@@ -990,6 +990,13 @@ ProcKill(int code, Datum arg)
 		else if (leader != MyProc)
 			MyProc->lockGroupLeader = NULL;
 		LWLockRelease(leader_lwlock);
+		/*
+		 * Test hooks for src/test/modules/prockill_race.  Synchronize
+		 * concurrent ProcKill paths in a lock group; two names are used so
+		 * a controller can attach a PID-scoped "wait" action per name.
+		 */
+		INJECTION_POINT("prockill-after-lockgroup-leader", NULL);
+		INJECTION_POINT("prockill-after-lockgroup-follower", NULL);
 	}
 
 	/*

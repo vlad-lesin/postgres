@@ -1,0 +1,7 @@
+# prockill_race extension
+comment = 'TAP test helpers for ProcKill lock-group / injection point race'
+default_version = '1.0'
+module_pathname = '$libdir/prockill_race'
+relocatable = true
+superuser = true
+trusted = true

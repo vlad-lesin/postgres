@@ -59,7 +59,7 @@ SUBDIRS = \
 
 
 ifeq ($(enable_injection_points),yes)
-SUBDIRS += injection_points gin typcache
+SUBDIRS += injection_points gin typcache prockill_race
 else
 ALWAYS_SUBDIRS += injection_points gin typcache
 endif
